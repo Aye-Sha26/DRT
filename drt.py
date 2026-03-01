@@ -63,7 +63,6 @@ html, body, [class*="css"] {
     font-size: 0.6rem;
     min-width: 28px;
 }
-/* Scrollable matrix container */
 .matrix-wrap {
     background: #161b27;
     border: 1px solid #252d3d;
@@ -123,35 +122,13 @@ section[data-testid="stFileUploadDropzone"] {
 
 # ── Helpers ──────────────────────────────────
 
-def to_gray(img):
-    return np.array(img.convert("L"), dtype=np.uint8)
-
 def to_rgb_array(img):
     return np.array(img.convert("RGB"), dtype=np.uint8)
 
-def gray_matrix_html(arr, rows, cols):
-    """Grayscale pixel matrix with heatmap background."""
+def rgb_matrix_html(arr, rows, cols):
+    """RGB pixel matrix — shows R/G/B per cell with actual pixel colour as bg."""
     rows = min(rows, arr.shape[0])
     cols = min(cols, arr.shape[1])
-    patch = arr[:rows, :cols]
-    html = '<table class="pixel-table"><tr><th></th>'
-    for c in range(cols): html += f"<th>{c}</th>"
-    html += "</tr>"
-    for r in range(rows):
-        html += f"<tr><th>{r}</th>"
-        for c in range(cols):
-            val = int(patch[r, c])
-            norm = val / 255.0
-            bg = f"rgba({int(norm*60)},{int(norm*80)},{int(80+norm*120)},0.7)"
-            html += f'<td style="background:{bg}">{val}</td>'
-        html += "</tr>"
-    html += "</table>"
-    return html
-
-def rgb_matrix_html(arr, size=6):
-    """RGB pixel matrix — actual pixel color as background."""
-    rows = min(size, arr.shape[0])
-    cols = min(size, arr.shape[1])
     patch = arr[:rows, :cols]
     html = '<table class="pixel-table"><tr><th></th>'
     for c in range(cols): html += f"<th>{c}</th>"
@@ -163,27 +140,48 @@ def rgb_matrix_html(arr, size=6):
             brightness = 0.299*R + 0.587*G + 0.114*B
             text_color = "#000" if brightness > 128 else "#fff"
             html += (f'<td style="background:rgb({R},{G},{B});color:{text_color};'
-                     f'font-size:0.55rem;line-height:1.2">{R}<br>{G}<br>{B}</td>')
+                     f'font-size:0.55rem;line-height:1.3">{R}<br>{G}<br>{B}</td>')
         html += "</tr>"
     html += "</table>"
     return html
 
 
-# ── Transformations ───────────────────────────
+# ── Transformations (applied per RGB channel) ────────────────────────────────
 
-def log_transform(arr):
-    arr_f = arr.astype(np.float64)
-    c = 255 / np.log(1 + arr_f.max()) if arr_f.max() > 0 else 1
-    return np.clip(c * np.log(1 + arr_f), 0, 255).astype(np.uint8)
+def log_transform_rgb(arr):
+    """Apply log transform to each R, G, B channel independently."""
+    result = np.zeros_like(arr, dtype=np.uint8)
+    for i in range(3):  # R=0, G=1, B=2
+        ch = arr[:, :, i].astype(np.float64)
+        c = 255 / np.log(1 + ch.max()) if ch.max() > 0 else 1
+        result[:, :, i] = np.clip(c * np.log(1 + ch), 0, 255).astype(np.uint8)
+    return result
 
-def power_transform(arr, gamma):
-    arr_f = arr.astype(np.float64) / 255.0
-    return np.clip(np.power(arr_f, gamma) * 255.0, 0, 255).astype(np.uint8)
+def power_transform_rgb(arr, gamma):
+    """Apply gamma/power transform to each R, G, B channel independently."""
+    result = np.zeros_like(arr, dtype=np.uint8)
+    for i in range(3):
+        ch = arr[:, :, i].astype(np.float64) / 255.0
+        result[:, :, i] = np.clip(np.power(ch, gamma) * 255.0, 0, 255).astype(np.uint8)
+    return result
 
-def linear_stretch(arr):
-    mn, mx = arr.min(), arr.max()
-    if mx == mn: return arr.copy()
-    return ((arr.astype(np.float64) - mn) / (mx - mn) * 255).astype(np.uint8)
+def linear_stretch_rgb(arr):
+    """Apply linear stretch to each R, G, B channel independently."""
+    result = np.zeros_like(arr, dtype=np.uint8)
+    for i in range(3):
+        ch = arr[:, :, i].astype(np.float64)
+        mn, mx = ch.min(), ch.max()
+        if mx == mn:
+            result[:, :, i] = ch.astype(np.uint8)
+        else:
+            result[:, :, i] = np.clip((ch - mn) / (mx - mn) * 255, 0, 255).astype(np.uint8)
+    return result
+
+def apply_transform(arr, name, gamma=None):
+    if name == "Log Transform":  return log_transform_rgb(arr)
+    if name == "Linear Stretch": return linear_stretch_rgb(arr)
+    if "γ<1" in name:            return power_transform_rgb(arr, gamma if gamma else 0.4)
+    if "γ>1" in name:            return power_transform_rgb(arr, gamma if gamma else 2.5)
 
 TRANSFORMS = ["Log Transform", "Power/Gamma (γ<1)", "Power/Gamma (γ>1)", "Linear Stretch"]
 BADGE_MAP  = {
@@ -193,17 +191,11 @@ BADGE_MAP  = {
     "Linear Stretch":    "badge-linear",
 }
 FORMULA = {
-    "Log Transform":     "s = c · log(1 + r)",
-    "Power/Gamma (γ<1)": "s = rᵞ,  γ < 1  →  brightens image",
-    "Power/Gamma (γ>1)": "s = rᵞ,  γ > 1  →  darkens image",
-    "Linear Stretch":    "s = (r − min) / (max − min) × 255",
+    "Log Transform":     "s = c · log(1 + r)  — applied to each R, G, B channel",
+    "Power/Gamma (γ<1)": "s = rᵞ, γ < 1  →  brightens each R, G, B channel",
+    "Power/Gamma (γ>1)": "s = rᵞ, γ > 1  →  darkens each R, G, B channel",
+    "Linear Stretch":    "s = (r − min) / (max − min) × 255  — per channel stretch",
 }
-
-def apply_transform(arr, name, gamma=None):
-    if name == "Log Transform":  return log_transform(arr)
-    if name == "Linear Stretch": return linear_stretch(arr)
-    if "γ<1" in name:            return power_transform(arr, gamma if gamma else 0.4)
-    if "γ>1" in name:            return power_transform(arr, gamma if gamma else 2.5)
 
 
 # ══════════════════════════════════════════════
@@ -221,7 +213,6 @@ if not uploaded:
 
 img_pil = Image.open(uploaded)
 rgb_arr = to_rgb_array(img_pil)
-gray    = to_gray(img_pil)
 
 st.divider()
 
@@ -230,20 +221,19 @@ st.divider()
 # ════════════════════════════════════════
 st.markdown("#### Original Image")
 
-# Matrix size control
 max_r = min(img_pil.height, 50)
 max_c = min(img_pil.width, 50)
 
 ctrl1, ctrl2, ctrl3 = st.columns([1, 1, 4])
 with ctrl1:
-    mat_rows = st.slider("Matrix rows", 4, max_r, min(16, max_r), key="mat_rows")
+    mat_rows = st.slider("Matrix rows", 4, max_r, min(10, max_r), key="mat_rows")
 with ctrl2:
-    mat_cols = st.slider("Matrix cols", 4, max_c, min(16, max_c), key="mat_cols")
+    mat_cols = st.slider("Matrix cols", 4, max_c, min(10, max_c), key="mat_cols")
 with ctrl3:
-    st.markdown(f'<div class="info-box" style="margin-top:0.3rem">Showing top-left <b>{mat_rows} × {mat_cols}</b> pixel crop out of <b>{img_pil.height} × {img_pil.width}</b> total pixels.</div>',
+    st.markdown(f'<div class="info-box" style="margin-top:0.3rem">Showing top-left <b>{mat_rows} × {mat_cols}</b> crop out of <b>{img_pil.height} × {img_pil.width}</b> total pixels. Each cell shows R / G / B values.</div>',
                 unsafe_allow_html=True)
 
-c_img, c_info, c_rgb, c_gray = st.columns([1.2, 0.7, 1.8, 1.8])
+c_img, c_info, c_rgb = st.columns([1.2, 0.8, 2.5])
 
 with c_img:
     st.markdown('<div class="badge badge-original">ORIGINAL</div>', unsafe_allow_html=True)
@@ -254,20 +244,16 @@ with c_info:
                 f'<b>File:</b> {uploaded.name}<br><br>'
                 f'<b>Size:</b> {img_pil.width} × {img_pil.height} px<br><br>'
                 f'<b>Mode:</b> {img_pil.mode}<br><br>'
-                f'<b>Gray range:</b><br>{gray.min()} – {gray.max()}'
+                f'<b>R range:</b> {rgb_arr[:,:,0].min()} – {rgb_arr[:,:,0].max()}<br>'
+                f'<b>G range:</b> {rgb_arr[:,:,1].min()} – {rgb_arr[:,:,1].max()}<br>'
+                f'<b>B range:</b> {rgb_arr[:,:,2].min()} – {rgb_arr[:,:,2].max()}'
                 '</div>', unsafe_allow_html=True)
 
 with c_rgb:
-    st.markdown('<div class="section-label"> ORIGINAL RGB PIXEL MATRIX</div>', unsafe_allow_html=True)
-    st.markdown('<div class="matrix-wrap">' + rgb_matrix_html(rgb_arr, min(mat_rows, 12)) + "</div>",
+    st.markdown('<div class="section-label">🎨 ORIGINAL RGB PIXEL MATRIX</div>', unsafe_allow_html=True)
+    st.markdown('<div class="matrix-wrap">' + rgb_matrix_html(rgb_arr, mat_rows, mat_cols) + "</div>",
                 unsafe_allow_html=True)
-    st.caption("Each cell = R / G / B. Background = actual pixel colour. (capped at 12 rows for readability)")
-
-with c_gray:
-    st.markdown('<div class="section-label">⬛ GRAYSCALE PIXEL MATRIX</div>', unsafe_allow_html=True)
-    st.markdown('<div class="matrix-wrap">' + gray_matrix_html(gray, mat_rows, mat_cols) + "</div>",
-                unsafe_allow_html=True)
-    st.caption(f"Showing {mat_rows}×{mat_cols} crop. Scroll inside the box to see all values.")
+    st.caption("Each cell = R / G / B values. Background = actual pixel colour.")
 
 st.divider()
 
@@ -286,13 +272,13 @@ with tc2:
     if "Gamma" in chosen:
         lo, hi, default = (0.1, 0.99, 0.4) if "γ<1" in chosen else (1.01, 5.0, 2.5)
         gamma_val = st.slider("γ", lo, hi, default, 0.01 if "γ<1" in chosen else 0.1)
-    apply_btn = st.button(" Apply Transform")
+    apply_btn = st.button("Apply Transform")
 
 with tc3:
     st.markdown(f'<div class="info-box"><b>Formula:</b> {FORMULA[chosen]}</div>', unsafe_allow_html=True)
 
 if apply_btn:
-    result = apply_transform(gray, chosen, gamma_val)
+    result = apply_transform(rgb_arr, chosen, gamma_val)
     st.session_state["result"]      = result
     st.session_state["result_name"] = chosen
     st.session_state.setdefault("all_transforms", {})[chosen] = result
@@ -306,17 +292,17 @@ if "result" in st.session_state and st.session_state.get("result_name") == chose
 
     with r1:
         st.markdown('<div class="badge badge-original">ORIGINAL</div>', unsafe_allow_html=True)
-        st.image(gray, clamp=True, use_container_width=True)
+        st.image(img_pil, use_container_width=True)
     with r2:
         st.markdown(f'<div class="badge {badge}">TRANSFORMED</div>', unsafe_allow_html=True)
         st.image(result, clamp=True, use_container_width=True)
     with r3:
-        st.markdown("**Original Grayscale Matrix**")
-        st.markdown('<div class="matrix-wrap-sm">' + gray_matrix_html(gray, mat_rows, mat_cols) + "</div>",
+        st.markdown("**Original RGB Matrix**")
+        st.markdown('<div class="matrix-wrap-sm">' + rgb_matrix_html(rgb_arr, mat_rows, mat_cols) + "</div>",
                     unsafe_allow_html=True)
     with r4:
-        st.markdown("**Transformed Matrix**")
-        st.markdown('<div class="matrix-wrap-sm">' + gray_matrix_html(result, mat_rows, mat_cols) + "</div>",
+        st.markdown("**Transformed RGB Matrix**")
+        st.markdown('<div class="matrix-wrap-sm">' + rgb_matrix_html(result, mat_rows, mat_cols) + "</div>",
                     unsafe_allow_html=True)
 
 st.divider()
@@ -324,7 +310,7 @@ st.divider()
 # ════════════════════════════════════════
 #  SECTION 3 — Comparison
 # ════════════════════════════════════════
-st.markdown("####  Comparison")
+st.markdown("#### Comparison")
 
 all_t = st.session_state.get("all_transforms", {})
 
@@ -332,19 +318,21 @@ if not all_t:
     st.markdown('<div style="text-align:center;padding:2rem;color:#8892a4;font-family:Space Mono,monospace;">Apply at least one transformation above to see the comparison.</div>',
                 unsafe_allow_html=True)
 else:
-    combined = {"Original": gray, **all_t}
+    # Store original as PIL for display, others as numpy RGB
+    combined_imgs  = {"Original": img_pil, **{k: Image.fromarray(v) for k, v in all_t.items()}}
+    combined_arrs  = {"Original": rgb_arr, **all_t}
 
-    img_cols = st.columns(len(combined))
-    for col, (name, arr) in zip(img_cols, combined.items()):
+    img_cols = st.columns(len(combined_imgs))
+    for col, (name, img) in zip(img_cols, combined_imgs.items()):
         with col:
             badge = BADGE_MAP.get(name, "badge-original")
             st.markdown(f'<div class="badge {badge}">{name[:14].upper()}</div>', unsafe_allow_html=True)
-            st.image(arr, clamp=True, use_container_width=True)
+            st.image(img, use_container_width=True)
 
-    st.markdown("**Pixel Matrices** *(scrollable)*")
-    mat_cols_comp = st.columns(len(combined))
-    for col, (name, arr) in zip(mat_cols_comp, combined.items()):
+    st.markdown("**RGB Pixel Matrices** *(scrollable)*")
+    mat_cols_comp = st.columns(len(combined_arrs))
+    for col, (name, arr) in zip(mat_cols_comp, combined_arrs.items()):
         with col:
             st.markdown(f"*{name}*")
-            st.markdown('<div class="matrix-wrap-sm">' + gray_matrix_html(arr, mat_rows, mat_cols) + "</div>",
+            st.markdown('<div class="matrix-wrap-sm">' + rgb_matrix_html(arr, mat_rows, mat_cols) + "</div>",
                         unsafe_allow_html=True)
